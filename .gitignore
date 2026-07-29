@@ -1,0 +1,20 @@
+# Compilados e temporários
+build/
+.pio/
+.pioenvs/
+.piolibdeps/
+*.hex
+*.elf
+*.bin
+*~
+
+# Configurações do VS Code locais
+.vscode/
+
+# Arquivos de log e testes locais no cartão SD (simulação)
+dados.txt
+logs.txt
+fila.csv
+lastack.txt
+ATMARIA.txt
+q_tmp.csv
