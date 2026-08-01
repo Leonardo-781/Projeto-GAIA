@@ -964,6 +964,7 @@ bool enviarPorRadio(const String &payload, bool isEncrypted = false) {
       return false;
     }
   }
+  toSend += "\n"; // Adiciona quebra de linha para o receptor identificar o fim do pacote
 
   ResponseStatus rs = e220ttl.sendMessage(toSend);
   if (rs.code != 1) { 
