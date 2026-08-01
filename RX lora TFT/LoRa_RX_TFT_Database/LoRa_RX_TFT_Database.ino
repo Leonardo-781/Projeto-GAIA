@@ -419,7 +419,7 @@ void iniciarModoAP() {
     }
     
     // Portal de setup premium unificado
-    String html = R"(
+    String html = R"raw(
     <!DOCTYPE html>
     <html lang="pt-BR">
     <head>
@@ -536,7 +536,7 @@ void iniciarModoAP() {
           <div class="form-group">
             <label for="ssid">Selecione a Rede WiFi</label>
             <select id="ssid" name="ssid">
-              )" + scanOptions + R"(
+              )raw" + scanOptions + R"raw(
             </select>
           </div>
           
@@ -547,12 +547,12 @@ void iniciarModoAP() {
           
           <div class="form-group">
             <label for="db_url">URL do Banco de Dados (API)</label>
-            <input type="text" id="db_url" name="db_url" value=")" + database_url + R"(">
+            <input type="text" id="db_url" name="db_url" value=")raw" + database_url + R"raw(">
           </div>
           
           <div class="form-group">
             <label for="chave_crypto">Chave Criptográfica LoRa (16 chars)</label>
-            <input type="text" id="chave_crypto" name="chave_crypto" value=")" + String(chave_crypto) + R"(" minlength="16" maxlength="16" required placeholder="Ex: ChaveSecreta123">
+            <input type="text" id="chave_crypto" name="chave_crypto" value=")raw" + String(chave_crypto) + R"raw(" minlength="16" maxlength="16" required placeholder="Ex: ChaveSecreta123">
           </div>
           
           <button type="submit" class="btn btn-primary">Salvar e Reiniciar</button>
@@ -571,7 +571,7 @@ void iniciarModoAP() {
       </script>
     </body>
     </html>
-    )";
+    )raw";
     server.send(200, "text/html", html);
   });
 
