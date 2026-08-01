@@ -3,7 +3,6 @@
  * ARQUIVO: teste_diagnostico_tx.ino
  * VERSÃO: 1.0
  * DATA: 2026-07-28
- * AUTOR: Antigravity AI
  * DESCRIÇÃO: Código de teste e diagnóstico completo para a Estação de Campo (TX).
  *            Varre o barramento I2C, testa o cartão SD, sensores (DHT22, BMP280, 
  *            VEML7700, DS18B20, Umidade do Solo), relógio RTC e o módulo LoRa E220.

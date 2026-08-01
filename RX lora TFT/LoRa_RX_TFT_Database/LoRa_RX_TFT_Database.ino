@@ -4,7 +4,6 @@
  * PROJETO: Projeto GAIA - Central Receptora Agroclimática
  * VERSÃO: 2.5
  * DATA: 2026-08-01
- * AUTOR: Antigravity AI
  * MODIFICAÇÕES:
  * 1. Implementação de criptografia simétrica AES-128-CBC via hardware (MbedTLS)
  *    para recepção segura de dados via rádio LoRa.

@@ -4,7 +4,6 @@
  * PROJETO: Projeto GAIA - Estação Agroclimática de Campo
  * VERSÃO: 2.5
  * DATA: 2026-07-29
- * AUTOR: Antigravity AI
  * MODIFICAÇÕES:
  * 1. Implementação de criptografia simétrica AES-128-CBC via hardware (MbedTLS).
  * 2. Portal Web AP reformulado com CSS responsivo e premium, listagem dinâmica
