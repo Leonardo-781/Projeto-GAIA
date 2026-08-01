@@ -2,8 +2,8 @@
  * ============================================================================
  * ARQUIVO: LoRa_RX_TFT_Database.ino
  * PROJETO: Projeto GAIA - Central Receptora Agroclimática
- * VERSÃO: 2.4
- * DATA: 2026-07-29
+ * VERSÃO: 2.5
+ * DATA: 2026-08-01
  * AUTOR: Antigravity AI
  * MODIFICAÇÕES:
  * 1. Implementação de criptografia simétrica AES-128-CBC via hardware (MbedTLS)
@@ -18,10 +18,12 @@
  * 6. Adicionado script de validação JavaScript no portal AP para garantir chave de 16 caracteres.
  * 7. Alterado o salvamento local de dados do receptor para utilizar o arquivo "/dados.txt"
  *    em vez de ".csv", harmonizando com o transmissor.
- * 8. Reestruturado algoritmo de leitura do Encoder Rotativo (EC11) utilizando
- *    máquina de estados Gray-Code de dupla interrupção (CHANGE), tornando o giro
- *    100% imune a ruídos elétricos (bouncing) e pulos de opções.
- * 9. Aplicada a nova identidade visual e nomenclatura do projeto: "Projeto GAIA".
+ * 8. Simplificado e otimizado o algoritmo do Encoder Rotativo (EC11) para usar 
+ *    interrupção simples por descida (FALLING) com debounce de 40ms por software. 
+ *    Isso resolve o travamento e comportamento errático em encoders comuns (como o KY-040).
+ * 9. Implementado atalho duplo para forçar o Modo Portal AP:
+ *    - Segurando o botão do encoder (GPIO 27) durante a inicialização (boot).
+ *    - Segurando o botão do encoder por 5 segundos contínuos durante a operação.
  * ============================================================================
  * 
  * PROJETO: Central Receptora de Dados (ESP32 + TFT ILI9341 + LoRa E220)
@@ -60,8 +62,8 @@
 #define ENCODER_DT  26
 #define ENCODER_SW  27
 
-// Fator de passos por clique físico do Encoder (padrão EC11 = 4)
-#define ENCODER_STEPS_PER_CLICK 4
+// Passos por clique físico (Com interrupção simples, 1 passo por clique é o ideal)
+#define ENCODER_STEPS_PER_CLICK 1
 
 // Caminhos dos arquivos no cartão SD
 #define DATA_FILE  "/dados.txt"
@@ -84,11 +86,12 @@ char wifi_password[64] = "";
 char chave_crypto[17] = "MARIACRYPTOKEY12"; // Chave padrão
 String database_url = "http://sua-api-aqui.com/api/receber-dados"; 
 
-// Controle do Encoder e Menu (Máquina de Estados)
+// Controle do Encoder e Menu
 volatile int encoderPos = 0;
-volatile int lastEncoded = 0;
+volatile unsigned long lastEncoderInterrupt = 0;
 int lastEncoderPos = 0;
 unsigned long lastButtonPress = 0;
+unsigned long buttonPressedTimer = 0; // Timer para atalho de 5 segundos
 
 enum UIState {
   STATE_LOGS, 
@@ -109,25 +112,23 @@ char activeSSID[32] = "OFFLINE";
 String loraBuffer = "";
 
 // ============================================================================
-// INTERRUPÇÃO DO ENCODER (MÁQUINA DE ESTADOS GRAY CODE - ANTI-BOUNCING REAL)
+// INTERRUPÇÃO SIMPLES DO ENCODER (DEBOUNCE POR SOFTWARE - ESTÁVEL E FLUIDO)
 // ============================================================================
 void IRAM_ATTR readEncoder() {
-  int MSB = digitalRead(ENCODER_CLK);
-  int LSB = digitalRead(ENCODER_DT);
-  
-  int encoded = (MSB << 1) | LSB;
-  int sum = (lastEncoded << 2) | encoded;
-  
-  // Transições válidas em sentido horário (CW)
-  if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
-    encoderPos++;
+  unsigned long now = millis();
+  // Ignora ruídos de bouncing mecânico ocorridos em menos de 40ms
+  if (now - lastEncoderInterrupt < 40) {
+    return;
   }
-  // Transições válidas em sentido anti-horário (CCW)
-  else if (sum == 0b1110 || sum == 0b1000 || sum == 0b0001 || sum == 0b0111) {
+  
+  int dtVal = digitalRead(ENCODER_DT);
+  if (dtVal == HIGH) {
+    encoderPos++;
+  } else {
     encoderPos--;
   }
   
-  lastEncoded = encoded;
+  lastEncoderInterrupt = now;
 }
 
 // ============================================================================
@@ -686,14 +687,14 @@ void setup() {
   pinMode(ENCODER_DT, INPUT_PULLUP);
   pinMode(ENCODER_SW, INPUT_PULLUP);
   
-  // Inicialização do estado de leitura do Gray Code
-  int MSB = digitalRead(ENCODER_CLK);
-  int LSB = digitalRead(ENCODER_DT);
-  lastEncoded = (MSB << 1) | LSB;
+  // Atalho 1: Se o botão do encoder for pressionado no boot, força modo AP
+  if (digitalRead(ENCODER_SW) == LOW) {
+    Serial.println("⚠️ Botão do Encoder pressionado no boot! Forçando modo AP.");
+    iniciarModoAP();
+  }
   
-  // Interrupções em CHANGE nos dois pinos para decodificação Gray Code anti-bouncing
-  attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), readEncoder, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_DT), readEncoder, CHANGE);
+  // Interrupção simples na descida (FALLING) do CLK para leitura estável
+  attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), readEncoder, FALLING);
   Serial.println("Encoder Rotativo inicializado.");
   
   // Inicializa o módulo LoRa na Serial2 a 9600 bps (Padrão do E220)
@@ -763,7 +764,19 @@ void setup() {
 // LOOP PRINCIPAL
 // ============================================================================
 void loop() {
-  // 1. Processar cliques no botão do Encoder (Enter / Menu)
+  // 1. Atalho 2: Se segurar o botão do encoder por 5 segundos contínuos, força AP de setup
+  if (digitalRead(ENCODER_SW) == LOW) {
+    if (buttonPressedTimer == 0) {
+      buttonPressedTimer = millis();
+    } else if (millis() - buttonPressedTimer > 5000) {
+      Serial.println("⚠️ Botão pressionado por 5s! Forçando modo AP...");
+      iniciarModoAP();
+    }
+  } else {
+    buttonPressedTimer = 0;
+  }
+
+  // 2. Processar cliques rápidos comuns no botão do Encoder (Enter / Menu)
   if (digitalRead(ENCODER_SW) == LOW) {
     if (millis() - lastButtonPress > 250) { 
       lastButtonPress = millis();
@@ -813,7 +826,7 @@ void loop() {
     }
   }
 
-  // 2. Processar rotação física do Encoder (Giro por cliques reais)
+  // 3. Processar rotação física do Encoder (Giro estável de 1 passo por clique)
   int change = encoderPos - lastEncoderPos;
   if (abs(change) >= ENCODER_STEPS_PER_CLICK) {
     int diff = (change > 0) ? 1 : -1;
@@ -835,7 +848,7 @@ void loop() {
     }
   }
 
-  // 3. Escuta de mensagens via LoRa (Serial2)
+  // 4. Escuta de mensagens via LoRa (Serial2)
   while (LoraSerial.available()) {
     char c = LoraSerial.read();
     if (c == '\n' || c == '\r') {
@@ -850,7 +863,7 @@ void loop() {
     }
   }
   
-  // 4. Gerenciamento assíncrono da conexão WiFi e reenvio de fila offline com auto-reconexão ativa
+  // 5. Gerenciamento assíncrono da conexão WiFi e reenvio de fila offline com auto-reconexão ativa
   unsigned long currentMillis = millis();
   if (currentMillis - lastWifiCheck >= wifiCheckInterval) {
     lastWifiCheck = currentMillis;
