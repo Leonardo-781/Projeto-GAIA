@@ -707,21 +707,21 @@ void setup() {
   digitalWrite(SD_CS, HIGH);
 
   // Inicializa o barramento SPI com os pinos corretos (SCK=18, MISO=19, MOSI=23)
-  SPI.begin(18, 19, 23, TFT_CS);
+  SPI.begin(18, 19, 23);
   delay(50);
   
-  // Inicialização do display TFT
-  tft.begin();
-  tft.setRotation(1); // Modo Paisagem (320x240)
-  Serial.println("Display TFT inicializado.");
-  
-  // Inicialização do cartao SD (SPI compartilhado)
-  sdOK = SD.begin(SD_CS);
+  // 1. Inicializa o cartao SD PRIMEIRO para garantir estabilidade no barramento compartilhado
+  sdOK = SD.begin(SD_CS, SPI, 4000000);
   if (sdOK) {
     Serial.println("Cartao SD inicializado com sucesso.");
   } else {
     Serial.println("AVISO: Falha ao inicializar o cartao SD.");
   }
+  
+  // 2. Inicialização do display TFT depois
+  tft.begin();
+  tft.setRotation(1); // Modo Paisagem (320x240)
+  Serial.println("Display TFT inicializado.");
   
   // Inicializa a Interface Gráfica da Tela
   initUI();
