@@ -129,8 +129,8 @@ void drawLogs(int scrollOffset) {
   
   if (logCount == 0) {
     tft.setTextColor(ILI9341_DARKGREY);
-    tft.setCursor(85, 130);
-    tft.print("Aguardando dados LoRa...");
+    tft.setCursor(65, 130);
+    tft.print("Aguardando telemetria Wi-Fi...");
     return;
   }
   
@@ -221,3 +221,52 @@ void drawMenu(int selectedOption) {
     }
   }
 }
+
+void drawAPScreen(int stationCount, const char* ssid, const char* pass, const char* ip) {
+  // Limpar tela inteira
+  tft.fillScreen(COR_FUNDO);
+  
+  // Banner de cabeçalho com logo e divisor
+  tft.fillRect(0, 0, 320, 45, COR_HEADER_BG);
+  tft.drawRGBBitmap(5, 5, (const uint16_t*)logo_montebot, LOGO_WIDTH, LOGO_HEIGHT);
+  tft.setTextColor(ILI9341_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(60, 14);
+  tft.print("CONFIGURACAO AP");
+  tft.fillRect(0, 45, 320, 3, COR_DIVISOR);
+
+  // Subtítulo descritivo
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(15, 58);
+  tft.print("Receptor em modo Ponto de Acesso (Setup):");
+
+  // Box com SSID, senha e IP
+  tft.drawRoundRect(15, 76, 290, 88, 8, COR_SELECAO);
+  tft.fillRoundRect(16, 77, 288, 86, 7, 0x0821);
+
+  tft.setTextSize(2);
+  tft.setTextColor(COR_AMARELO);
+  tft.setCursor(25, 88);
+  tft.printf("SSID: %s", ssid);
+
+  tft.setCursor(25, 114);
+  tft.printf("Senha: %s", pass);
+
+  tft.setTextSize(1);
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setCursor(25, 142);
+  tft.printf("IP: http://%s", ip);
+
+  // Contador de clientes conectados
+  tft.fillRoundRect(15, 174, 290, 26, 6, 0x18C3);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setCursor(25, 183);
+  tft.printf("Dispositivos conectados: %d", stationCount);
+
+  // Rodapé com atalho de retorno
+  tft.setTextColor(ILI9341_LIGHTGREY);
+  tft.setCursor(15, 215);
+  tft.print("Pressione o Encoder para sair / cancelar");
+}
+

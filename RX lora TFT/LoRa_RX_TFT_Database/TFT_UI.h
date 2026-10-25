@@ -40,5 +40,6 @@ void drawHeader(bool wifiConnected, const char* ssid, bool sdConnected, int last
 void addLogEntry(const char* project, const char* data, int httpStatus);
 void drawLogs(int scrollOffset = 0);
 void drawMenu(int selectedOption);
+void drawAPScreen(int stationCount, const char* ssid, const char* pass, const char* ip);
 
 #endif

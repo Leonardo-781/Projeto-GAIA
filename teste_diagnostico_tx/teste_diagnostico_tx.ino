@@ -5,7 +5,7 @@
  * DATA: 2026-07-28
  * DESCRIÇÃO: Código de teste e diagnóstico completo para a Estação de Campo (TX).
  *            Varre o barramento I2C, testa o cartão SD, sensores (DHT22, BMP280, 
- *            VEML7700, DS18B20, Umidade do Solo), relógio RTC e o módulo LoRa E220.
+ *            VEML7700, DS18B20, Umidade do Solo), relógio RTC e a rede Wi-Fi.
  * COMUNICAÇÃO: ESP32 conectado na porta COM25.
  * ============================================================================
  */
@@ -16,24 +16,17 @@
 #include <Adafruit_BMP280.h>
 #include <Adafruit_VEML7700.h>
 #include <DHT.h>
-#include <RTClib.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include "LoRa_E220.h"
+#include <WiFi.h>
 
 // Definições de pinos da Estação
-#define SOLO_PIN        34
+#define SOLO_PIN        35
 #define SD_CS           5
 #define DHTPIN          14
 #define DHTTYPE         DHT22
 #define BTN_FORMAT_PIN  4
 #define BTN_AP_PIN      15
-
-#define LORA_RX_PIN     16
-#define LORA_TX_PIN     17
-#define LORA_M0_PIN     25
-#define LORA_M1_PIN     26
-#define LORA_AUX_PIN    27
 
 #define LED_PIN         2
 #define ONE_WIRE_BUS    13
@@ -42,13 +35,9 @@
 Adafruit_BMP280 bmp;
 Adafruit_VEML7700 veml;
 DHT dht(DHTPIN, DHTTYPE);
-RTC_DS3231 rtc;
 
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature ds18Sensors(&oneWire);
-
-HardwareSerial loraSerial(2);
-LoRa_E220 e220ttl(&loraSerial, LORA_AUX_PIN, LORA_M0_PIN, LORA_M1_PIN);
 
 void setup() {
   Serial.begin(115200);
@@ -78,10 +67,9 @@ void setup() {
     error = Wire.endTransmission();
     if (error == 0) {
       Serial.printf(" ➔ Dispositivo I2C encontrado no endereço 0x%02X ", address);
-      if (address == 0x68) Serial.println("(RTC DS3231)");
-      else if (address == 0x76 || address == 0x77) Serial.println("(Barômetro BMP280)");
+      if (address == 0x76 || address == 0x77) Serial.println("(Barômetro BMP280)");
       else if (address == 0x10) Serial.println("(Sensor de Luz VEML7700)");
-      else Serial.println("(Desconhecido)");
+      else Serial.println("(Outro)");
       nDevices++;
     }
   }
@@ -134,15 +122,16 @@ void setup() {
     Serial.printf(" ➔ VEML7700 OK. Luminosidade: %.2f Lux\n", veml.readLux());
   }
 
-  // 6. Teste do Relógio RTC DS3231
-  Serial.println("\n[6] Inicializando RTC DS3231 (I2C)...");
-  if (!rtc.begin()) {
-    Serial.println(" ❌ Erro ao iniciar RTC! Verifique fiação.");
+  // 6. Teste de Relogio e Timestamp (Sincronizado via Relogio Atomico NTP.br)
+  Serial.println("\n[6] Verificando Relogio Interno do ESP32 / Timestamp...");
+  time_t agora = time(NULL);
+  if (agora > 1700000000) {
+    struct tm *tmInfo = localtime(&agora);
+    Serial.printf(" ➔ Relogio Atomico Sincronizado OK: %02d/%02d/%04d %02d:%02d:%02d (TS: %u)\n", 
+                  tmInfo->tm_mday, tmInfo->tm_mon + 1, tmInfo->tm_year + 1900, 
+                  tmInfo->tm_hour, tmInfo->tm_min, tmInfo->tm_sec, (uint32_t)agora);
   } else {
-    DateTime agora = rtc.now();
-    Serial.printf(" ➔ RTC OK. Data/Hora atual: %02d/%02d/%04d %02d:%02d:%02d\n", 
-                  agora.day(), agora.month(), agora.year(), 
-                  agora.hour(), agora.minute(), agora.second());
+    Serial.println(" ℹ️ Relogio aguardando conexao Wi-Fi para sincronizar com Relogio Atomico (a.st1.ntp.br).");
   }
 
   // 7. Teste do DS18B20 (Temperatura do Solo)
@@ -156,17 +145,20 @@ void setup() {
     Serial.printf(" ➔ DS18B20 OK. Temp. do Solo: %.2f °C\n", tSolo);
   }
 
-  // 8. Teste do Módulo LoRa E220
-  Serial.println("\n[8] Testando Comunicação Serial com LoRa E220 (GPIO 16 - RX, GPIO 17 - TX)...");
-  loraSerial.begin(9600, SERIAL_8N1, LORA_RX_PIN, LORA_TX_PIN);
-  e220ttl.begin();
-  ResponseStructContainer c = e220ttl.getConfiguration();
-  if (c.status.code != 1) {
-    Serial.printf(" ❌ Falha ao comunicar com o LoRa E220! Código: %s\n", c.status.getResponseDescription().c_str());
+  // 8. Diagnostico da interface Wi-Fi
+  Serial.println("\n[8] Testando interface Wi-Fi e varredura de redes...");
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  int redes = WiFi.scanNetworks();
+  if (redes < 0) {
+    Serial.println("Falha ao executar a varredura Wi-Fi.");
   } else {
-    Serial.println(" ➔ LoRa E220 OK. Comunicação Serial estabelecida.");
+    Serial.printf("Wi-Fi OK. Redes encontradas: %d\n", redes);
+    for (int i = 0; i < redes; i++) {
+      Serial.printf("- %s (%ld dBm)\n", WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i));
+    }
   }
-  c.close();
 
   // 9. Teste do Sensor de Umidade do Solo Analógico (GPIO 34)
   Serial.println("\n[9] Lendo Sensor de Umidade do Solo Analógico (GPIO 34)...");

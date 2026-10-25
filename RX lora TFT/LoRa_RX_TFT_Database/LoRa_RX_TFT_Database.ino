@@ -37,6 +37,7 @@
 #include <ArduinoJson.h>
 #include <SD.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <Preferences.h>
 
 #include "TFT_UI.h"
@@ -53,9 +54,6 @@
 #define TFT_RST  4
 #define SD_CS    15  // Chip Select do leitor de Cartão SD
 
-#define LORA_RX  16  // RX2 do ESP32 (conectar no TX do LoRa)
-#define LORA_TX  17  // TX2 do ESP32 (conectar no RX do LoRa)
-
 // Pinos do Encoder Rotativo EC11
 #define ENCODER_CLK 25
 #define ENCODER_DT  26
@@ -68,12 +66,13 @@
 #define DATA_FILE  "/dados.txt"
 #define QUEUE_FILE "/fila.csv"
 
-// Instanciamento dos objetos do Display e Servidor Web
+// Instanciamento dos objetos do Display, Servidor Web e DNS Captivo
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 WebServer server(80);
-
-// Configuração da Porta Serial do LoRa (Serial2)
-HardwareSerial LoraSerial(2);
+DNSServer dnsServer;
+const byte DNS_PORT = 53;
+String rxScanOptions = "";
+bool telemetriaServerAtivo = false;
 
 // ============================================================================
 // VARIÁVEIS GLOBAIS DE CONFIGURAÇÃO E ESTADO
@@ -106,9 +105,6 @@ unsigned long lastWifiCheck = 0;
 const unsigned long wifiCheckInterval = 10000; // Verifica WiFi a cada 10s
 int lastHttpStatus = 0;
 char activeSSID[32] = "OFFLINE";
-
-// Buffer para leitura do LoRa
-String loraBuffer = "";
 
 // ============================================================================
 // INTERRUPÇÃO SIMPLES DO ENCODER (DEBOUNCE POR SOFTWARE - ESTÁVEL E FLUIDO)
@@ -294,7 +290,12 @@ int sendDataToDatabase(String project, String data, String &rawPayload) {
   
   doc["project"] = project;
   doc["data"] = data;
-  doc["timestamp"] = millis() / 1000;
+  time_t agora = time(NULL);
+  if (agora > 1700000000) {
+    doc["timestamp"] = (uint32_t)agora;
+  } else {
+    doc["timestamp"] = millis() / 1000;
+  }
   
   serializeJson(doc, rawPayload);
 
@@ -314,6 +315,113 @@ int sendDataToDatabase(String project, String data, String &rawPayload) {
   http.end();
   
   return httpResponseCode;
+}
+
+// ============================================================================
+// FUNÇÕES DE RECEPÇÃO DE TELEMETRIA VIA WI-FI (GATEWAY REST HTTP)
+// ============================================================================
+bool processTelemetryMessage(String message) {
+  message.trim();
+  if (message.length() == 0) return false;
+  
+  Serial.print("Telemetria Wi-Fi Recebida: ");
+  Serial.println(message);
+  
+  String processedMessage = message;
+  
+  // Se nao inicia com '{', tenta descriptografar usando a chave AES-128
+  if (!message.startsWith("{")) {
+    String decryptedMessage;
+    if (!decryptAES(message, chave_crypto, decryptedMessage)) {
+      Serial.println("ERRO: Falha ao descriptografar mensagem Wi-Fi. Chave incorreta ou pacote corrompido.");
+      return false;
+    }
+    processedMessage = decryptedMessage;
+    Serial.print("Telemetria Descriptografada: ");
+    Serial.println(processedMessage);
+  }
+  
+  String projectName = "GAIA RX";
+  String payloadData = processedMessage;
+  
+  #if ARDUINOJSON_VERSION_MAJOR >= 7
+    JsonDocument doc;
+  #else
+    StaticJsonDocument<512> doc;
+  #endif
+  
+  DeserializationError error = deserializeJson(doc, processedMessage);
+  
+  if (!error) {
+    if (doc.containsKey("codSta")) {
+      projectName = doc["codSta"].as<String>();
+    } else if (doc.containsKey("estacao")) {
+      projectName = doc["estacao"].as<String>();
+    }
+    payloadData = processedMessage;
+  }
+  
+  // Envia ao Banco de Dados e gera payload completo
+  String rawPayload = "";
+  int responseCode = sendDataToDatabase(projectName, payloadData, rawPayload);
+  lastHttpStatus = responseCode;
+  
+  // Atualiza barra superior
+  drawHeader(WiFi.status() == WL_CONNECTED, activeSSID, sdOK, lastHttpStatus);
+  
+  // Salva no Cartao SD localmente no arquivo de texto (/dados.txt)
+  gravarNoSD(projectName, payloadData, responseCode);
+  
+  // Se falhou o envio para o banco, armazena na fila para reenvio
+  if (responseCode < 200 || responseCode >= 300) {
+    enfileirar(rawPayload);
+  }
+  
+  // Adiciona a entrada na lista de Logs da Tela
+  addLogEntry(projectName.c_str(), "Telemetria Wi-Fi", responseCode);
+  
+  // Volta o scrollOffset para mostrar o dado novo no topo
+  if (currentState == STATE_LOGS) {
+    scrollOffset = 0;
+    drawLogs(scrollOffset);
+  }
+
+  return true;
+}
+
+void handleReceberTelemetria() {
+  String payload = "";
+  if (server.hasArg("plain")) {
+    payload = server.arg("plain");
+  } else if (server.args() > 0) {
+    payload = server.arg((size_t)0);
+  }
+  
+  if (payload.length() == 0) {
+    server.send(400, "application/json", "{\"status\":\"erro\",\"mensagem\":\"Corpo da requisicao vazio\"}");
+    return;
+  }
+  
+  bool ok = processTelemetryMessage(payload);
+  if (ok) {
+    server.send(200, "application/json", "{\"status\":\"sucesso\",\"mensagem\":\"Telemetria recebida e processada via Wi-Fi\"}");
+  } else {
+    server.send(400, "application/json", "{\"status\":\"erro\",\"mensagem\":\"Falha ao processar telemetria (criptografia ou JSON invalido)\"}");
+  }
+}
+
+void iniciarServidorTelemetria() {
+  server.close();
+  server.on("/api/telemetria", HTTP_POST, handleReceberTelemetria);
+  server.on("/api/receber-dados", HTTP_POST, handleReceberTelemetria);
+  server.on("/dados", HTTP_POST, handleReceberTelemetria);
+  server.on("/", HTTP_GET, []() {
+    String info = "{\"projeto\":\"Projeto GAIA Central RX\",\"status\":\"online\",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+    server.send(200, "application/json", info);
+  });
+  server.begin();
+  telemetriaServerAtivo = true;
+  Serial.printf("Servidor de Telemetria HTTP ativo no IP: %s (porta 80)\n", WiFi.localIP().toString().c_str());
 }
 
 // ============================================================================
@@ -340,13 +448,15 @@ void connectWiFi() {
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi conectado!");
+    Serial.println("\nWiFi conectado com sucesso!");
+    Serial.printf("IP Local do Gateway RX: %s\n", WiFi.localIP().toString().c_str());
     strncpy(activeSSID, wifi_ssid, sizeof(activeSSID) - 1);
     
-    // Sincroniza o relógio (GMT-3 Brasília)
-    configTime(-3 * 3600, 0, "a.ntp.br", "pool.ntp.org");
+    // Sincroniza com o Relógio Atômico (NTP.br / Observatório Nacional)
+    configTime(-3 * 3600, 0, "a.st1.ntp.br", "b.st1.ntp.br", "pool.ntp.org");
     
     drawHeader(true, activeSSID, sdOK, lastHttpStatus);
+    iniciarServidorTelemetria();
     processarFila();
   } else {
     Serial.println("\nFalha na conexao.");
@@ -358,67 +468,75 @@ void connectWiFi() {
 // ============================================================================
 // PORTAL DE CONFIGURAÇÃO (MODO SETUP AP)
 // ============================================================================
+void scanWifiNetworksRX() {
+  Serial.println("Escaneando redes Wi-Fi (RX)...");
+  WiFi.mode(WIFI_AP_STA);
+  int n = WiFi.scanNetworks(false, true);
+  rxScanOptions = "";
+  if (n <= 0) {
+    rxScanOptions = "<option value=\"\">Nenhuma rede Wi-Fi encontrada</option>";
+    WiFi.scanDelete();
+    return;
+  }
+
+  for (int i = 0; i < n; i++) {
+    String s = WiFi.SSID(i);
+    s.trim();
+    if (s.length() == 0) continue;
+
+    bool duplicate = false;
+    for (int j = 0; j < i; j++) {
+      if (WiFi.SSID(j) == s) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) continue;
+
+    int rssi = WiFi.RSSI(i);
+    String auth = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Aberta" : "Protegida";
+    String selected = (s == String(wifi_ssid)) ? "selected" : "";
+    rxScanOptions += "<option value=\"" + s + "\" " + selected + ">" +
+                     s + " (" + String(rssi) + " dBm, " + auth + ")</option>";
+  }
+  WiFi.scanDelete();
+}
+
+// ============================================================================
+// PORTAL DE CONFIGURAÇÃO (MODO SETUP AP COM PORTAL CAPTIVO)
+// ============================================================================
 void iniciarModoAP() {
   WiFi.disconnect();
   delay(100);
-  
-  // Desenhar tela de aviso de Setup no display
-  tft.fillScreen(COR_FUNDO);
-  tft.fillRect(0, 0, 320, 45, COR_HEADER_BG);
-  tft.setTextColor(ILI9341_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(10, 15);
-  tft.print("CONFIGURACAO WIFI");
-  
-  tft.fillRect(0, 45, 320, 3, COR_DIVISOR);
-  
-  tft.setTextColor(ILI9341_WHITE);
-  tft.setTextSize(1);
-  tft.setCursor(10, 70);
-  tft.print("O receptor entrou em modo de configuracao.");
-  
-  tft.setCursor(10, 100);
-  tft.setTextSize(2);
-  tft.setTextColor(COR_AMARELO);
-  tft.print("SSID: GAIA-RX-SETUP");
-  
-  tft.setCursor(10, 130);
-  tft.setTextColor(COR_AMARELO);
-  tft.print("Senha: gaiaconfig");
-  
-  tft.setCursor(10, 170);
-  tft.setTextColor(ILI9341_CYAN);
-  tft.print("Acesse: 192.168.4.1");
-  
-  tft.setTextSize(1);
-  tft.setTextColor(ILI9341_LIGHTGREY);
-  tft.setCursor(10, 210);
-  tft.print("Use seu celular para conectar e configurar.");
 
-  // Inicializa o Access Point
-  WiFi.mode(WIFI_AP);
+  // Varre redes antes de abrir o servidor
+  scanWifiNetworksRX();
+
+  // Inicializa o Access Point em modo híbrido AP_STA
+  WiFi.mode(WIFI_AP_STA);
   WiFi.softAP("GAIA-RX-SETUP", "gaiaconfig");
-  
+  IPAddress apIP = WiFi.softAPIP();
+
+  // Inicia servidor DNS na porta 53 para Portal Captivo
+  dnsServer.start(DNS_PORT, "*", apIP);
+
   Serial.println("=========================================");
-  Serial.println("MODO SETUP ATIVO - PROJETO GAIA");
+  Serial.println("MODO SETUP ATIVO - CENTRAL RECEPTORA GAIA");
   Serial.println("SSID: GAIA-RX-SETUP");
   Serial.println("Senha: gaiaconfig");
+  Serial.print("IP: ");
+  Serial.println(apIP);
   Serial.println("Acesse: http://192.168.4.1");
   Serial.println("=========================================");
 
+  // Desenha a tela dedicada do Modo AP no Display TFT
+  drawAPScreen(0, "GAIA-RX-SETUP", "gaiaconfig", "192.168.4.1");
+
+  static bool apRunning = true;
+  apRunning = true;
+
   // Rota raiz (Formulário)
   server.on("/", HTTP_GET, []() {
-    int n = WiFi.scanNetworks();
-    String scanOptions = "";
-    if (n <= 0) {
-      scanOptions = "<option value=\"\">Nenhuma rede Wi-Fi encontrada</option>";
-    } else {
-      for (int i = 0; i < n; i++) {
-        scanOptions += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
-      }
-    }
-    
-    // Portal de setup premium unificado
     String html = R"raw(
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -436,19 +554,20 @@ void iniciarModoAP() {
           --accent-hover: #2563eb;
           --text-color: #f3f4f6;
           --text-muted: #9ca3af;
+          --danger-color: #ef4444;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
           font-family: 'Outfit', sans-serif;
           background-color: var(--bg-color);
-          background-image: radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 45%),
-                            radial-gradient(circle at bottom left, rgba(16, 185, 129, 0.05), transparent 45%);
+          background-image: radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 45%),
+                            radial-gradient(circle at bottom left, rgba(16, 185, 129, 0.08), transparent 45%);
           color: var(--text-color);
           display: flex;
           justify-content: center;
           align-items: center;
           min-height: 100vh;
-          padding: 20px;
+          padding: 16px;
         }
         .container {
           width: 100%;
@@ -458,13 +577,13 @@ void iniciarModoAP() {
           -webkit-backdrop-filter: blur(16px);
           border: 1px solid var(--card-border);
           border-radius: 24px;
-          padding: 35px;
+          padding: 30px 24px;
           box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
         }
         h2 {
           font-weight: 700;
           font-size: 1.8rem;
-          margin-bottom: 8px;
+          margin-bottom: 6px;
           background: linear-gradient(135deg, #3b82f6, #10b981);
           -webkit-background-clip: text;
           -webkit-text-fill-color: transparent;
@@ -474,48 +593,68 @@ void iniciarModoAP() {
           color: var(--text-muted);
           font-size: 0.9rem;
           text-align: center;
-          margin-bottom: 30px;
+          margin-bottom: 20px;
+        }
+        .chips {
+          display: flex;
+          justify-content: center;
+          gap: 8px;
+          margin-bottom: 22px;
+        }
+        .chip {
+          background: rgba(59, 130, 246, 0.15);
+          border: 1px solid rgba(59, 130, 246, 0.3);
+          color: #60a5fa;
+          font-size: 0.75rem;
+          font-weight: 600;
+          padding: 4px 12px;
+          border-radius: 999px;
         }
         .form-group {
-          margin-bottom: 22px;
+          margin-bottom: 18px;
         }
         label {
           display: block;
-          font-size: 0.8rem;
+          font-size: 0.78rem;
           font-weight: 600;
-          margin-bottom: 8px;
+          margin-bottom: 6px;
           color: var(--text-muted);
           text-transform: uppercase;
-          letter-spacing: 0.07em;
+          letter-spacing: 0.06em;
         }
         input[type="text"], input[type="password"], select {
           width: 100%;
-          padding: 14px 18px;
+          padding: 12px 14px;
           background: rgba(255, 255, 255, 0.03);
           border: 1px solid var(--card-border);
           border-radius: 12px;
           color: var(--text-color);
           font-family: inherit;
-          font-size: 1rem;
+          font-size: 0.95rem;
           transition: all 0.3s ease;
         }
         input:focus, select:focus {
           outline: none;
           border-color: var(--accent-color);
-          box-shadow: 0 0 12px rgba(59, 130, 246, 0.25);
-          background: rgba(255, 255, 255, 0.07);
+          box-shadow: 0 0 10px rgba(59, 130, 246, 0.25);
+          background: rgba(255, 255, 255, 0.06);
+        }
+        .input-row {
+          display: flex;
+          gap: 8px;
         }
         .btn {
           display: block;
           width: 100%;
-          padding: 15px;
+          padding: 13px;
           border: none;
           border-radius: 12px;
-          font-size: 1rem;
+          font-size: 0.95rem;
           font-weight: 600;
           cursor: pointer;
           transition: all 0.3s ease;
           text-align: center;
+          margin-top: 10px;
         }
         .btn-primary {
           background: var(--accent-color);
@@ -523,43 +662,96 @@ void iniciarModoAP() {
         }
         .btn-primary:hover {
           background: var(--accent-hover);
-          box-shadow: 0 6px 20px rgba(59, 130, 246, 0.35);
+          box-shadow: 0 6px 18px rgba(59, 130, 246, 0.35);
+        }
+        .btn-secondary {
+          background: rgba(255, 255, 255, 0.08);
+          color: #f3f4f6;
+          font-size: 0.82rem;
+          padding: 8px 12px;
+          border-radius: 8px;
+          width: auto;
+          margin: 0;
+          text-decoration: none;
+        }
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.15); }
+        .btn-cancel {
+          background: rgba(255, 255, 255, 0.06);
+          color: var(--text-muted);
+          border: 1px solid var(--card-border);
+        }
+        .btn-cancel:hover {
+          background: rgba(255, 255, 255, 0.12);
+          color: #fff;
+        }
+        .hint {
+          font-size: 0.72rem;
+          color: var(--text-muted);
+          margin-top: 4px;
         }
       </style>
     </head>
     <body>
       <div class="container">
-        <h2>Setup Central GAIA</h2>
-        <p class="subtitle">Gerencie os parâmetros da central receptora</p>
-        
+        <h2>Central GAIA - RX</h2>
+        <p class="subtitle">Parâmetros da Central Receptora</p>
+
+        <div class="chips">
+          <span class="chip">AP: GAIA-RX-SETUP</span>
+          <span class="chip">IP: 192.168.4.1</span>
+        </div>
+
         <form action="/salvar" method="POST" onsubmit="return validarForm()">
           <div class="form-group">
-            <label for="ssid">Selecione a Rede WiFi</label>
-            <select id="ssid" name="ssid">
-              )raw" + scanOptions + R"raw(
-            </select>
+            <label for="ssid_list">Redes Wi-Fi Detectadas</label>
+            <div class="input-row">
+              <select id="ssid_list" onchange="selecionarRede()">
+                <option value="">Selecione uma rede ou digite abaixo...</option>
+                )raw" + rxScanOptions + R"raw(
+              </select>
+              <a href="/scan" class="btn btn-secondary" style="display:flex; align-items:center;">Escanear</a>
+            </div>
           </div>
-          
+
           <div class="form-group">
-            <label for="senha">Senha do WiFi</label>
-            <input type="password" id="senha" name="senha" placeholder="Senha da Rede">
+            <label for="ssid">SSID da Rede Wi-Fi</label>
+            <input type="text" id="ssid" name="ssid" value=")raw" + String(wifi_ssid) + R"raw(" required placeholder="Nome do Wi-Fi">
           </div>
-          
+
           <div class="form-group">
-            <label for="db_url">URL do Banco de Dados (API)</label>
-            <input type="text" id="db_url" name="db_url" value=")raw" + database_url + R"raw(">
+            <label for="senha">Senha do Wi-Fi</label>
+            <div class="input-row">
+              <input type="password" id="senha" name="senha" value=")raw" + String(wifi_password) + R"raw(" placeholder="Senha do roteador">
+              <button type="button" class="btn-secondary" onclick="toggleSenha()">Ver</button>
+            </div>
           </div>
-          
+
           <div class="form-group">
-            <label for="chave_crypto">Chave Criptográfica LoRa (16 chars)</label>
+            <label for="db_url">URL do Banco de Dados / API</label>
+            <input type="text" id="db_url" name="db_url" value=")raw" + database_url + R"raw(" required placeholder="http://servidor/api/receber-dados">
+            <div class="hint">Endpoint HTTP REST que recebe os pacotes decodificados.</div>
+          </div>
+
+          <div class="form-group">
+            <label for="chave_crypto">Chave Criptográfica AES-128 (16 chars)</label>
             <input type="text" id="chave_crypto" name="chave_crypto" value=")raw" + String(chave_crypto) + R"raw(" minlength="16" maxlength="16" required placeholder="Ex: ChaveSecreta123">
+            <div class="hint">Deve ser idêntica à chave configurada nas estações de campo.</div>
           </div>
-          
-          <button type="submit" class="btn btn-primary">Salvar e Reiniciar</button>
+
+          <button type="submit" class="btn btn-primary">Salvar e Conectar</button>
+          <a href="/cancelar" class="btn btn-cancel" style="text-decoration:none;">Cancelar / Voltar aos Logs</a>
         </form>
       </div>
-      
+
       <script>
+        function selecionarRede() {
+          var s = document.getElementById('ssid_list').value;
+          if (s) document.getElementById('ssid').value = s;
+        }
+        function toggleSenha() {
+          var p = document.getElementById('senha');
+          p.type = (p.type === 'password') ? 'text' : 'password';
+        }
         function validarForm() {
           var key = document.getElementById('chave_crypto').value;
           if (key.length !== 16) {
@@ -575,18 +767,36 @@ void iniciarModoAP() {
     server.send(200, "text/html", html);
   });
 
-  // Rota para processar os dados recebidos
+  // Rota para reescanear redes
+  server.on("/scan", HTTP_GET, []() {
+    scanWifiNetworksRX();
+    server.sendHeader("Location", "http://192.168.4.1/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  // Rota para cancelar e voltar ao monitoramento
+  server.on("/cancelar", HTTP_GET, []() {
+    server.send(200, "text/plain", "Encerrando modo AP e retornando aos logs...");
+    delay(500);
+    apRunning = false;
+  });
+
+  // Rota para salvar dados de configuração
   server.on("/salvar", HTTP_POST, []() {
     String newSSID = server.arg("ssid");
     String newPass = server.arg("senha");
     String newUrl  = server.arg("db_url");
     String newChave = server.arg("chave_crypto");
-    
-    // Preenche com '0' se menor que 16
+
+    newSSID.trim();
+    newPass.trim();
+    newUrl.trim();
+    newChave.trim();
+
     if (newChave.length() < 16) {
       while (newChave.length() < 16) newChave += "0";
     }
-    
+
     Preferences prefs;
     prefs.begin("wifi-db", false);
     prefs.putString("ssid", newSSID);
@@ -594,83 +804,74 @@ void iniciarModoAP() {
     prefs.putString("db_url", newUrl);
     prefs.putString("chave_crypto", newChave);
     prefs.end();
-    
-    server.send(200, "text/plain", "Dados salvos! Reiniciando a central...");
-    delay(2000);
+
+    server.send(200, "text/plain", "Dados salvos com sucesso! Reiniciando a central...");
+    delay(1500);
     ESP.restart();
   });
 
-  server.begin();
-  
-  // Trava no loop de atendimento do Setup
-  while (true) {
-    server.handleClient();
-    delay(10);
-  }
-}
+  // Endpoints padrao para Portal Captivo
+  auto handleCaptiveRedirect = []() {
+    server.sendHeader("Location", "http://192.168.4.1/", true);
+    server.send(302, "text/plain", "");
+  };
+  server.on("/generate_204", HTTP_GET, handleCaptiveRedirect);
+  server.on("/gen_204", HTTP_GET, handleCaptiveRedirect);
+  server.on("/hotspot-detect.html", HTTP_GET, handleCaptiveRedirect);
+  server.on("/canonical.html", HTTP_GET, handleCaptiveRedirect);
+  server.on("/ncsi.txt", HTTP_GET, handleCaptiveRedirect);
+  server.onNotFound(handleCaptiveRedirect);
 
-// ============================================================================
-// FUNÇÃO: Processar Mensagem Recebida via LoRa
-// ============================================================================
-void processLoraMessage(String message) {
-  message.trim();
-  if (message.length() == 0) return;
-  
-  Serial.print("LoRa Recebido (Encrypted): ");
-  Serial.println(message);
-  
-  // Tenta descriptografar usando a chave de segurança
-  String decryptedMessage;
-  if (!decryptAES(message, chave_crypto, decryptedMessage)) {
-    Serial.println("ERRO: Falha ao descriptografar mensagem LoRa. Chave incorreta ou pacote corrompido.");
-    return;
-  }
-  
-  Serial.print("LoRa Descriptografado: ");
-  Serial.println(decryptedMessage);
-  
-  String projectName = "GAIA RX";
-  String payloadData = decryptedMessage;
-  
-  #if ARDUINOJSON_VERSION_MAJOR >= 7
-    JsonDocument doc;
-  #else
-    StaticJsonDocument<512> doc;
-  #endif
-  
-  DeserializationError error = deserializeJson(doc, decryptedMessage);
-  
-  if (!error) {
-    if (doc.containsKey("codSta")) {
-      projectName = doc["codSta"].as<String>();
+  server.begin();
+
+  unsigned long apStart = millis();
+  int lastStations = -1;
+  unsigned long lastTftUpdate = 0;
+
+  // Loop de atendimento do AP com Portal Captivo
+  while (apRunning) {
+    dnsServer.processNextRequest();
+    server.handleClient();
+
+    // Atualiza contagem de dispositivos no display TFT periodicamente
+    if (millis() - lastTftUpdate > 1000) {
+      lastTftUpdate = millis();
+      int stations = WiFi.softAPgetStationNum();
+      if (stations != lastStations) {
+        lastStations = stations;
+        drawAPScreen(stations, "GAIA-RX-SETUP", "gaiaconfig", "192.168.4.1");
+      }
     }
-    payloadData = decryptedMessage;
+
+    // Saida do AP pressionando o Encoder
+    if (digitalRead(ENCODER_SW) == LOW) {
+      delay(50);
+      if (digitalRead(ENCODER_SW) == LOW) {
+        Serial.println("Saida do Modo AP solicitada via clique do encoder.");
+        while (digitalRead(ENCODER_SW) == LOW) delay(10);
+        apRunning = false;
+        break;
+      }
+    }
+
+    // Timeout de 10 minutos para retorno automatico
+    if (millis() - apStart > 600000UL) {
+      Serial.println("Timeout do Modo AP atingido. Retornando ao monitoramento...");
+      apRunning = false;
+      break;
+    }
+
+    delay(5);
   }
-  
-  // Envia ao Banco de Dados e gera payload completo
-  String rawPayload = "";
-  int responseCode = sendDataToDatabase(projectName, payloadData, rawPayload);
-  lastHttpStatus = responseCode;
-  
-  // Atualiza barra superior
-  drawHeader(WiFi.status() == WL_CONNECTED, activeSSID, sdOK, lastHttpStatus);
-  
-  // Salva no Cartão SD localmente no arquivo de texto (/dados.txt)
-  gravarNoSD(projectName, payloadData, responseCode);
-  
-  // Se falhou o envio para o banco, armazena na fila para reenvio
-  if (responseCode < 200 || responseCode >= 300) {
-    enfileirar(rawPayload);
-  }
-  
-  // Adiciona a entrada na lista de Logs da Tela
-  addLogEntry(projectName.c_str(), "Telemetria OK", responseCode);
-  
-  // Volta o scrollOffset para mostrar o dado novo no topo
-  if (currentState == STATE_LOGS) {
-    scrollOffset = 0;
-    drawLogs(scrollOffset);
-  }
+
+  // Finalizacao limpa do AP e retorno a operacao normal
+  dnsServer.stop();
+  server.close();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  Serial.println("Modo AP encerrado. Restaurando tela e reconectando Wi-Fi.");
+  initUI();
+  connectWiFi();
 }
 
 // ============================================================================
@@ -679,26 +880,19 @@ void processLoraMessage(String message) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("--- Inicializando Central Receptora GAIA LoRa ---");
+  Serial.println("--- Inicializando Central Receptora GAIA Wi-Fi ---");
   
   // Configuração das entradas do Encoder Rotativo (Internal Pull-Up)
   pinMode(ENCODER_CLK, INPUT_PULLUP);
   pinMode(ENCODER_DT, INPUT_PULLUP);
   pinMode(ENCODER_SW, INPUT_PULLUP);
   
-  // Atalho 1: Se o botão do encoder for pressionado no boot, força modo AP
-  if (digitalRead(ENCODER_SW) == LOW) {
-    Serial.println("⚠️ Botão do Encoder pressionado no boot! Forçando modo AP.");
-    iniciarModoAP();
-  }
+  // Atalho 1: Detecta se o botão do encoder foi pressionado durante a energização (boot)
+  bool forcarAPNoBoot = (digitalRead(ENCODER_SW) == LOW);
   
   // Interrupção simples na descida (FALLING) do CLK para leitura estável
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), readEncoder, FALLING);
   Serial.println("Encoder Rotativo inicializado.");
-  
-  // Inicializa o módulo LoRa na Serial2 a 9600 bps (Padrão do E220)
-  LoraSerial.begin(9600, SERIAL_8N1, LORA_RX, LORA_TX);
-  Serial.println("Porta Serial2 do LoRa inicializada.");
   
   // Configura os pinos de Chip Select como saída e desativa no boot
   pinMode(TFT_CS, OUTPUT);
@@ -718,7 +912,7 @@ void setup() {
     Serial.println("AVISO: Falha ao inicializar o cartao SD.");
   }
   
-  // 2. Inicialização do display TFT depois
+  // 2. Inicialização do display TFT (garante display pronto antes de qualquer desenho)
   tft.begin();
   tft.setRotation(1); // Modo Paisagem (320x240)
   Serial.println("Display TFT inicializado.");
@@ -746,9 +940,20 @@ void setup() {
   strncpy(chave_crypto, storedChave.c_str(), 16);
   chave_crypto[16] = '\0';
   
-  // Se for a primeira vez rodando (sem WiFi configurado), inicia portal AP
-  if (storedSSID.length() == 0) {
+  // Se o botão estava pressionado no boot OU se for o primeiro boot sem WiFi, entra no modo AP
+  if (forcarAPNoBoot || storedSSID.length() == 0) {
+    if (forcarAPNoBoot) {
+      Serial.println("⚠️ Botão do Encoder pressionado no boot! Entrando em modo AP.");
+    } else {
+      Serial.println("⚠️ Primeiro boot sem Wi-Fi configurado! Entrando em modo AP.");
+    }
     iniciarModoAP();
+    
+    // Recarrega apos saida ou salvamento
+    prefs.begin("wifi-db", true);
+    storedSSID = prefs.getString("ssid", "");
+    storedPassword = prefs.getString("senha", "");
+    prefs.end();
   }
   
   // Converte as credenciais para uso na biblioteca
@@ -770,6 +975,8 @@ void loop() {
     } else if (millis() - buttonPressedTimer > 5000) {
       Serial.println("⚠️ Botão pressionado por 5s! Forçando modo AP...");
       iniciarModoAP();
+      buttonPressedTimer = 0;
+      lastButtonPress = millis(); // Evita que o soltar seja interpretado como clique de menu
     }
   } else {
     buttonPressedTimer = 0;
@@ -847,22 +1054,12 @@ void loop() {
     }
   }
 
-  // 4. Escuta de mensagens via LoRa (Serial2)
-  while (LoraSerial.available()) {
-    char c = LoraSerial.read();
-    if (c == '\n' || c == '\r') {
-      if (loraBuffer.length() > 0) {
-        processLoraMessage(loraBuffer);
-        loraBuffer = "";
-      }
-    } else {
-      if (loraBuffer.length() < 256) { 
-        loraBuffer += c;
-      }
-    }
+  // 4. Atendimento de telemetria HTTP recebida via Wi-Fi
+  if (WiFi.status() == WL_CONNECTED) {
+    server.handleClient();
   }
   
-  // 5. Gerenciamento assíncrono da conexão WiFi e reenvio de fila offline com auto-reconexão ativa
+  // 5. Gerenciamento assincrono da conexao WiFi e reenvio de fila offline com auto-reconexao ativa
   unsigned long currentMillis = millis();
   if (currentMillis - lastWifiCheck >= wifiCheckInterval) {
     lastWifiCheck = currentMillis;
@@ -871,12 +1068,16 @@ void loop() {
       Serial.println("WiFi offline. Tentando reconectar...");
       strncpy(activeSSID, "OFFLINE", sizeof(activeSSID));
       drawHeader(false, "OFFLINE", sdOK, lastHttpStatus);
+      telemetriaServerAtivo = false;
       
-      // Executa reconexão assíncrona não-bloqueante ativa
+      // Executa reconexao assincrona nao-bloqueante ativa
       WiFi.begin(wifi_ssid, wifi_password);
     } else {
       strncpy(activeSSID, wifi_ssid, sizeof(activeSSID) - 1);
       drawHeader(true, activeSSID, sdOK, lastHttpStatus);
+      if (!telemetriaServerAtivo) {
+        iniciarServidorTelemetria();
+      }
       processarFila();
     }
   }
