@@ -18,3 +18,14 @@ fila.csv
 lastack.txt
 ATMARIA.txt
 q_tmp.csv
+
+# Node.js & Web Frontend
+node_modules/
+*/node_modules/
+dist/
+*/dist/
+.env
+.env.local
+*.log
+npm-debug.log*
+yarn-debug.log*

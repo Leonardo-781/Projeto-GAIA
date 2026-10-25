@@ -49,8 +49,15 @@ O **Projeto GAIA** é um sistema de monitoramento agrícola e telemetria de camp
 ## 📁 Estrutura do Repositório
 
 ```text
-├── TX_Telemetria/                 # Firmware da Estação Transmissora (TX)
+├── sistema_web/                   # Plataforma Web & Servidor REST/WebSocket
+│   ├── backend/                   # API Node.js (Express, PostgreSQL, Modelos FAO-56/VPD)
+│   ├── frontend/                  # Dashboard Web React/Vite com Mapas e Catálogo Agronômico
+│   ├── docker-compose.yml         # Orquestração do banco PostgreSQL e aplicação web
+│   └── README.md                  # Instruções de execução local e via Docker
+├── TX_Telemetria/                 # Firmware da Estação Transmissora Wi-Fi (TX)
 │   └── TX_Telemetria.ino          # Envio Wi-Fi/HTTP com Portal Captivo, NTP Atômico e NVS
+├── TX_G00002_TCall/               # Firmware da Estação Transmissora Celular GPRS (SIM800L)
+│   └── TX_G00002_TCall.ino        # Envio autônomo 100% celular (GPRS/2G)
 ├── TX Telemetria.c                # Cópia espelho de referência do transmissor
 ├── RX lora TFT/
 │   └── LoRa_RX_TFT_Database/      # Firmware da Central Receptora (RX Gateway Web)

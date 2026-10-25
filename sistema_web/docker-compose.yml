@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # BANCO DE DADOS POSTGRESQL (HISTÓRICO DE TELEMETRIA E PERFIS AGRONÔMICOS)
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: gaia-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-server_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-server_password_123}
+      POSTGRES_DB: ${POSTGRES_DB:-app_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - gaia_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U server_admin -d app_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # SISTEMA GAIA - SERVIDOR REST API & DASHBOARD EM TEMPO REAL
+  # ============================================================================
+  gaia-server:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gaia-server
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://server_admin:server_password_123@postgres:5432/app_db
+      AES_KEY: ${AES_KEY:-GaiaAgroIoT2026!}
+      GAIA_PROJECT_TOKEN: ${GAIA_PROJECT_TOKEN:-GAIA_TOKEN_2026_AGRO}
+      JWT_SECRET: ${JWT_SECRET:-GAIA_SUPER_SECRET_KEY_2026_JWT}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@gaia.agro.br}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-GaiaAdmin2026!}
+      DEMO_USER_EMAIL: ${DEMO_USER_EMAIL:-usuario@gaia.agro.br}
+      DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:-GaiaUser2026!}
+    ports:
+      - "3000:3000"
+
+volumes:
+  gaia_pgdata:
+    name: gaia_postgres_data

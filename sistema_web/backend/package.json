@@ -1,0 +1,16 @@
+{
+  "name": "gaia-telemetry-server",
+  "version": "1.0.0",
+  "description": "API e Dashboard em Tempo Real para o Projeto GAIA (Estacao Agroclimatica Inteligente)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.5",
+    "ws": "^8.17.0"
+  }
+}
